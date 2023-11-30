@@ -33,7 +33,7 @@ common common-options
                      , comonad
                      , conduino
                      , constraints
-                     , constraints-extras
+                     , constraints-extras < 0.4
                      , containers
                      , criterion
                      , data-default-class
