@@ -34,6 +34,11 @@ module AOC.Common (
   , scanrT
   , firstRepeated
   , firstRepeatedBy
+  , firstRepeatedFinitary
+  , firstRepeatedByFinitary
+  , findLoopBy
+  , skipConsecutive
+  , skipConsecutiveBy
   , fixedPoint
   , floodFill
   , floodFillCount
@@ -48,6 +53,10 @@ module AOC.Common (
   , perturbationsBy
   , select
   , slidingWindows
+  , withSlidingPairs
+  , slidingPairs
+  , withLaggedPairs
+  , laggedPairs
   , sortedSlidingWindows
   , sortedSlidingWindowsInt
   , clearOut
@@ -69,6 +78,12 @@ module AOC.Common (
   , _ListTup3
   , listTup4
   , _ListTup4
+  , listV2
+  , _ListV2
+  , listV3
+  , _ListV3
+  , listV4
+  , _ListV4
   , sortSizedBy
   , withAllSized
   , binaryFold
@@ -82,6 +97,9 @@ module AOC.Common (
   , decimalDigit
   , splitWord
   , digitToIntSafe
+  , toBinary
+  , toBinaryFixed
+  , parseBinary
   , caeser
   , eitherItem
   -- , getDown
@@ -89,6 +107,8 @@ module AOC.Common (
   , factorial
   , integerFactorial
   , pascals
+  , triangles
+  , triangleNumber
   , mapMaybeSet
   , symDiff
   , unfoldedIterate
@@ -111,6 +131,11 @@ module AOC.Common (
   , pTok
   , pSpace
   , parseLines
+  -- * Normal simple line-based
+  , mapMaybeLines
+  , mapMaybeLinesJust
+  , traverseLines
+  , parseBin
   -- * Graph
   , Graph
   , toFGL
@@ -128,8 +153,10 @@ import           Control.Lens
 import           Control.Monad
 import           Control.Monad.ST
 import           Control.Monad.State
+import           Control.Monad.Trans.Except
 import           Control.Parallel.Strategies
 import           Data.Bifunctor
+import           Data.Bit
 import           Data.Char
 import           Data.Coerce
 import           Data.Finite
@@ -155,7 +182,7 @@ import           Data.Word
 import           Debug.Trace
 import           GHC.Generics                       (Generic)
 import           GHC.TypeNats
-import           Linear                             (V2(..), V3(..), V4(..), R1(..), R2(..), R3(..), R4(..))
+import           Linear                             (V2(..), V3(..), V4(..), R1(..), R2(..), R3(..), R4(..), Additive(..))
 import           Numeric.Natural
 import qualified Control.Foldl                      as F
 import qualified Control.Monad.Combinators          as P
@@ -178,6 +205,8 @@ import qualified Data.Vector.Algorithms.Intro       as VAI
 import qualified Data.Vector.Generic                as VG
 import qualified Data.Vector.Generic.Sized          as SVG
 import qualified Data.Vector.Generic.Sized.Internal as SVG
+import qualified Data.Vector.Unboxed.Mutable.Sized          as UVM
+import qualified Numeric.Lens                       as L
 import qualified Text.Megaparsec                    as P
 import qualified Text.Megaparsec.Char               as P
 import qualified Text.Megaparsec.Char.Lexer         as PL
@@ -282,6 +311,43 @@ firstRepeatedBy f = go S.empty
       | otherwise           = go (f x `S.insert` seen) xs
     go _ []     = Nothing
 
+-- | firstRepeated but with a bitset
+firstRepeatedFinitary :: F.Finitary a => [a] -> Maybe a
+firstRepeatedFinitary = firstRepeatedByFinitary id
+
+-- | firstRepeatedBy but with a bitset
+firstRepeatedByFinitary :: F.Finitary a => (b -> a) -> [b] -> Maybe b
+firstRepeatedByFinitary f xs = runST do
+    seen <- UVM.replicate (Bit False)
+    res  <- runExceptT $ forM_ xs $ \i -> do
+      let ixf = F.toFinite (f i)
+      Bit found <- seen `UVM.read` ixf
+      when found $ throwE i
+      UVM.write seen ixf (Bit True)
+    pure case res of
+      Left x  -> Just x
+      Right _ -> Nothing
+
+-- | Find a "loop", where applying a function repeatedly creates a closed loop
+findLoopBy :: Ord a => (b -> a) -> [b] -> Maybe (V2 (Int, b))
+findLoopBy f = go 0 M.empty
+  where
+    go !i seen (x:xs) = case M.lookup (f x) seen of
+      Nothing -> go (i+1) (M.insert (f x) (i,x) seen) xs
+      Just (j,y)  -> Just (V2 (j, y) (i, x))
+    go _ _ []     = Nothing
+
+skipConsecutive :: Eq a => [a] -> [a]
+skipConsecutive = skipConsecutiveBy id
+
+skipConsecutiveBy :: Eq b => (a -> b) -> [a] -> [a]
+skipConsecutiveBy _ [] = []
+skipConsecutiveBy f (x:xs) = x:go x xs
+  where
+    go _ [] = []
+    go y (z:zs)
+      | f y == f z = go y zs
+      | otherwise  = z : go z zs
 
 -- | Repeat a function until you get the same result twice.
 fixedPoint :: Eq a => (a -> a) -> a -> a
@@ -374,7 +440,28 @@ charFinite (ord->c) = asum
     ]
 
 digitToIntSafe :: Char -> Maybe Int
-digitToIntSafe c = digitToInt c <$ guard (isDigit c)
+digitToIntSafe c = digitToInt c <$ guard (isDigit c || toLower c `elem` "abcdef")
+
+parseBinary :: [Bool] -> Int
+parseBinary = foldl' (\i b -> if b then i * 2 + 1 else i * 2) 0
+
+toBinary :: Int -> [Bool]
+toBinary x = go x []
+  where
+    go i = rest . ((b /= 0):)
+      where
+        (a, b) = i `divMod` 2
+        rest
+          | a == 0    = id
+          | otherwise = go a
+
+-- fixed number of digits, pad with 0
+toBinaryFixed :: Int -> Int -> [Bool]
+toBinaryFixed d x
+    | d <= 0    = []
+    | otherwise = (a /= 0) : toBinaryFixed (d-1) b
+  where
+    (a, b) = x `divMod` (2^(d-1))
 
 -- | Prism for a 'Char' as @('Bool', 'Finite' 26)@, where the 'Finite' is
 -- the letter parsed as a number from 0 to 25, and the 'Bool' is lowercase
@@ -434,6 +521,18 @@ perturbationsBy p f = experiment f <=< holesOf p
 clearOut :: (Char -> Bool) -> String -> String
 clearOut p = map $ \c -> if p c then ' '
                                 else c
+
+withLaggedPairs :: Int -> (a -> a -> b) -> [a] -> [b]
+withLaggedPairs n f xs = zipWith f xs (drop n xs)
+
+laggedPairs :: Int -> [a] -> [(a,a)]
+laggedPairs n = withLaggedPairs n (,)
+
+withSlidingPairs :: (a -> a -> b) -> [a] -> [b]
+withSlidingPairs = withLaggedPairs 1
+
+slidingPairs :: [a] -> [(a,a)]
+slidingPairs = laggedPairs 1
 
 -- | sliding windows of a given length
 slidingWindows :: Int -> [a] -> [Seq a]
@@ -577,6 +676,15 @@ _ListTup = prism' (\(x,y) -> [x,y]) $ \case
     [x,y] -> Just (x,y)
     _     -> Nothing
 
+listV2 :: [a] -> Maybe (V2 a)
+listV2 (x:y:_) = Just $ V2 x y
+listV2 _       = Nothing
+
+_ListV2 :: Prism' [a] (V2 a)
+_ListV2 = prism' (\(V2 x y) -> [x,y]) $ \case
+    [x,y] -> Just $ V2 x y
+    _     -> Nothing
+
 listTup3 :: [a] -> Maybe (a,a,a)
 listTup3 (x:y:z:_) = Just (x,y,z)
 listTup3 _         = Nothing
@@ -586,6 +694,15 @@ _ListTup3 = prism' (\(x,y,z) -> [x,y,z]) $ \case
     [x,y,z] -> Just (x,y,z)
     _       -> Nothing
 
+listV3 :: [a] -> Maybe (V3 a)
+listV3 (x:y:z:_) = Just $ V3 x y z
+listV3 _         = Nothing
+
+_ListV3 :: Prism' [a] (V3 a)
+_ListV3 = prism' (\(V3 x y z) -> [x,y,z]) $ \case
+    [x,y,z] -> Just $ V3 x y z
+    _       -> Nothing
+
 listTup4 :: [a] -> Maybe (a,a,a,a)
 listTup4 (x:y:z:k:_) = Just (x,y,z,k)
 listTup4 _           = Nothing
@@ -593,6 +710,15 @@ listTup4 _           = Nothing
 _ListTup4 :: Prism' [a] (a, a, a, a)
 _ListTup4 = prism' (\(x,y,z,k) -> [x,y,z,k]) $ \case
     [x,y,z,k] -> Just (x,y,z,k)
+    _         -> Nothing
+
+listV4 :: [a] -> Maybe (V4 a)
+listV4 (x:y:z:k:_) = Just $ V4 x y z k
+listV4 _           = Nothing
+
+_ListV4 :: Prism' [a] (V4 a)
+_ListV4 = prism' (\(V4 x y z k) -> [x,y,z,k]) $ \case
+    [x,y,z,k] -> Just $ V4 x y z k
     _         -> Nothing
 
 -- | Delete a potential value from a 'Finite'.
@@ -877,6 +1003,21 @@ type TokParser s = P.Parsec Void (TokStream s)
 nextMatch :: P.MonadParsec e s m => m a -> m a
 nextMatch = P.try . fmap snd . P.manyTill_ (P.try P.anySingle)
 
+traverseLines :: (String -> Maybe a) -> String -> Maybe [a]
+traverseLines f = traverse f . lines
+
+-- | parse a binary string
+--
+-- this is just here for me to remember that i can use lens combinators lol
+parseBin :: String -> Maybe Int
+parseBin = preview (L.base 2)
+
+mapMaybeLines :: (String -> Maybe a) -> String -> [a]
+mapMaybeLines f = mapMaybe f . lines
+
+mapMaybeLinesJust :: (String -> Maybe a) -> String -> Maybe [a]
+mapMaybeLinesJust f = Just . mapMaybeLines f
+
 toNatural :: Integral a => a -> Maybe Natural
 toNatural x = fromIntegral x <$ guard (x >= 0)
 
@@ -896,6 +1037,15 @@ integerFactorial n = go 2 1
 
 pascals :: [[Int]]
 pascals = repeat 1 : map (tail . L.scanl' (+) 0) pascals
+
+-- | the triangular numbers
+--
+-- triangles !! n = 1+2+..+n = (n * (n+1))/2
+triangles :: [Int]
+triangles = 0 : (pascals !! 2)
+
+triangleNumber :: Int -> Int
+triangleNumber n = (n * (n + 1)) `div` 2
 
 mapMaybeSet :: Ord b => (a -> Maybe b) -> Set a -> Set b
 mapMaybeSet f = S.fromList . mapMaybe f . S.toList
@@ -930,6 +1080,21 @@ unfoldedIterate _ f x = runIterate (N.induction1 start step :: Iterate n a)
     step :: Iterate m a -> Iterate ('N.S m) a
     step = coerce f
 
+instance (Functor v, FunctorWithIndex Int v) => FunctorWithIndex (Finite n) (SVG.Vector v n) where
+    imap f (SVG.Vector xs) = SVG.Vector $ imap (f . Finite . fromIntegral) xs
+
+instance (Foldable v, FoldableWithIndex Int v) => FoldableWithIndex (Finite n) (SVG.Vector v n) where
+    ifoldMap f (SVG.Vector xs) = ifoldMap (f . Finite . fromIntegral) xs
+
+instance (Traversable v, TraversableWithIndex Int v) => TraversableWithIndex (Finite n) (SVG.Vector v n) where
+    itraverse f (SVG.Vector xs) = SVG.Vector <$> itraverse (f . Finite . fromIntegral) xs
+
+instance (Functor v, KnownNat n, forall a. VG.Vector v a) => Additive (SVG.Vector v n) where
+    zero = SVG.replicate 0
+    x ^+^ y = SVG.zipWith (+) x y
+    x ^-^ y = SVG.zipWith (-) x y
+    liftU2 = SVG.zipWith
+    liftI2 = SVG.zipWith
 
 -- instance Hashable a => Hashable (Seq a) where
 --     hashWithSalt s = hashWithSalt s . toList
